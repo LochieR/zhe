@@ -1,0 +1,6 @@
+.vscode/
+.zig-cache/
+lib/
+zig-out/
+
+.clangd
