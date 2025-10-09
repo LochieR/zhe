@@ -19,6 +19,8 @@ const RenderPass = @import("RenderPass.zig").RenderPass;
 const RenderPassInfo = @import("RenderPass.zig").RenderPassInfo;
 const GraphicsPipeline = @import("GraphicsPipeline.zig").GraphicsPipeline;
 const GraphicsPipelineInfo = @import("GraphicsPipeline.zig").GraphicsPipelineInfo;
+const PrimitiveTopology = @import("GraphicsPipeline.zig").PrimitiveTopology;
+const ShaderResourceType = @import("ShaderLibrary.zig").ShaderResourceType;
 
 pub const DeviceError = error {
     NoValidGPUs,
@@ -390,7 +392,248 @@ pub const Device = struct {
         const pixel_shader_module = try self.device.createShaderModule(&pixel_module_create_info, self.instance.vk_allocator);
         errdefer self.device.destroyShaderModule(pixel_shader_module, self.instance.vk_allocator);
 
-        return undefined;
+        const vertex_shader_stage_info = vk.PipelineShaderStageCreateInfo{
+            .s_type = .pipeline_shader_stage_create_info,
+            .stage = .{ .vertex_bit = true },
+            .module = vertex_shader_module,
+            .p_name = "main"
+        };
+
+        const pixel_shader_stage_info = vk.PipelineShaderStageCreateInfo{
+            .s_type = .pipeline_shader_stage_create_info,
+            .stage = .{ .fragment_bit = true },
+            .module = pixel_shader_module,
+            .p_name = "main"
+        };
+
+        const shader_stages = [_]vk.PipelineShaderStageCreateInfo { vertex_shader_stage_info, pixel_shader_stage_info };
+
+        var dynamic_states = try std.ArrayListUnmanaged(vk.DynamicState).initCapacity(self.allocator, 2);
+        defer dynamic_states.deinit(self.allocator);
+
+        dynamic_states.appendAssumeCapacity(.viewport);
+        dynamic_states.appendAssumeCapacity(.scissor);
+
+        if (pipeline_info.primitive_topology == .line_list or pipeline_info.primitive_topology == .line_strip)
+            try dynamic_states.append(self.allocator, .line_width);
+
+        const dynamic_state = vk.PipelineDynamicStateCreateInfo{
+            .s_type = .pipeline_dynamic_state_create_info,
+            .dynamic_state_count = @intCast(dynamic_states.items.len),
+            .p_dynamic_states = dynamic_states.items.ptr
+        };
+
+        const vertex_input_layout = try pipeline_info.vertex_shader.reflectVertexInput(&self.allocator);
+        const bytes0 = @as([]u8, std.mem.sliceAsBytes(vertex_input_layout.@"0"));
+        const bytes1 = @as([]u8, std.mem.sliceAsBytes(vertex_input_layout.@"1"));
+        defer self.allocator.free(bytes0);
+        defer self.allocator.free(bytes1);
+
+        var binding_descriptions = try self.allocator.alloc(vk.VertexInputBindingDescription, vertex_input_layout.@"0".len);
+        defer self.allocator.free(binding_descriptions);
+        var attribute_descriptions = try self.allocator.alloc(vk.VertexInputAttributeDescription, vertex_input_layout.@"1".len);
+        defer self.allocator.free(attribute_descriptions);
+
+        for (0..vertex_input_layout.@"0".len) |i| {
+            binding_descriptions[i].binding = vertex_input_layout.@"0"[i].Binding;
+            binding_descriptions[i].stride = vertex_input_layout.@"0"[i].Stride;
+            binding_descriptions[i].input_rate = @enumFromInt(@as(i32, @intCast(vertex_input_layout.@"0"[i].InputRate)));
+        }
+
+        for (0..vertex_input_layout.@"1".len) |i| {
+            attribute_descriptions[i].binding = vertex_input_layout.@"1"[i].Binding;
+            attribute_descriptions[i].location = vertex_input_layout.@"1"[i].Location;
+            attribute_descriptions[i].offset = vertex_input_layout.@"1"[i].Offset;
+            attribute_descriptions[i].format = @enumFromInt(vertex_input_layout.@"1"[i].Format);
+        }
+
+        const vertex_input_info = vk.PipelineVertexInputStateCreateInfo{
+            .s_type = .pipeline_vertex_input_state_create_info,
+            .vertex_binding_description_count = @intCast(binding_descriptions.len),
+            .p_vertex_binding_descriptions = binding_descriptions.ptr,
+            .vertex_attribute_description_count = @intCast(attribute_descriptions.len),
+            .p_vertex_attribute_descriptions = attribute_descriptions.ptr
+        };
+
+        const input_assembly = vk.PipelineInputAssemblyStateCreateInfo{
+            .s_type = .pipeline_input_assembly_state_create_info,
+            .topology = convertPrimitiveTopology(pipeline_info.primitive_topology),
+            .primitive_restart_enable = .false,
+        };
+
+        const viewport_state = vk.PipelineViewportStateCreateInfo{
+            .s_type = .pipeline_viewport_state_create_info,
+            .viewport_count = 1,
+            .scissor_count = 1
+        };
+
+        const rasterizer = vk.PipelineRasterizationStateCreateInfo{
+            .s_type = .pipeline_rasterization_state_create_info,
+            .depth_clamp_enable = .false,
+            .rasterizer_discard_enable = .false,
+            .polygon_mode = .fill,
+            .line_width = 1.0,
+            .cull_mode = .{},
+            .front_face = .clockwise,
+            .depth_bias_enable = .false,
+            .depth_bias_constant_factor = 0.0,
+            .depth_bias_clamp = 0.0,
+            .depth_bias_slope_factor = 0.0
+        };
+
+        const multisampling = vk.PipelineMultisampleStateCreateInfo{
+            .s_type = .pipeline_multisample_state_create_info,
+            .rasterization_samples = .{ .@"1_bit" = true },
+            .sample_shading_enable = .true,
+            .min_sample_shading = 0.2,
+            .p_sample_mask = null,
+            .alpha_to_coverage_enable = .false,
+            .alpha_to_one_enable = .false
+        };
+
+        const color_blend_attachments = [_]vk.PipelineColorBlendAttachmentState {
+            vk.PipelineColorBlendAttachmentState{
+                .blend_enable = .true,
+                .src_color_blend_factor = .src_alpha,
+                .dst_color_blend_factor = .one_minus_src_alpha,
+                .color_blend_op = .add,
+                .src_alpha_blend_factor = .one,
+                .dst_alpha_blend_factor = .zero,
+                .alpha_blend_op = .add,
+                .color_write_mask = .{ .r_bit = true, .g_bit = true, .b_bit = true, .a_bit = true }
+            },
+        };
+
+        const color_blending = vk.PipelineColorBlendStateCreateInfo{
+            .s_type = .pipeline_color_blend_state_create_info,
+            .logic_op_enable = .false,
+            .attachment_count = @intCast(color_blend_attachments.len),
+            .p_attachments = &color_blend_attachments,
+            .blend_constants = [_]f32 { 0.0, 0.0, 0.0, 0.0 },
+            .logic_op = .clear
+        };
+
+        const depth_stencil = vk.PipelineDepthStencilStateCreateInfo{
+            .s_type = .pipeline_depth_stencil_state_create_info,
+            .depth_test_enable = .true,
+            .depth_write_enable = .true,
+            .depth_compare_op = .less,
+            .depth_bounds_test_enable = .false,
+            .min_depth_bounds = 0.0,
+            .max_depth_bounds = 1.0,
+            .stencil_test_enable = .false,
+            .front = std.mem.zeroInit(vk.StencilOpState, .{}),
+            .back = std.mem.zeroInit(vk.StencilOpState, .{})
+        };
+
+        var bindings = std.ArrayListUnmanaged(vk.DescriptorSetLayoutBinding){};
+        defer bindings.deinit(self.allocator);
+
+        if (pipeline_info.vertex_shader.shader_resources) |resources| {
+            for (resources) |resource| {
+                try bindings.append(self.allocator, vk.DescriptorSetLayoutBinding{
+                    .binding = resource.binding,
+                    .descriptor_count = resource.resource_count,
+                    .stage_flags = .{ .vertex_bit = true },
+                    .descriptor_type = convertShaderResourceType(resource.resource_type),
+                });
+            }
+        }
+
+        if (pipeline_info.pixel_shader.shader_resources) |resources| {
+            for (resources) |resource| {
+                try bindings.append(self.allocator, vk.DescriptorSetLayoutBinding{
+                    .binding = resource.binding,
+                    .descriptor_count = resource.resource_count,
+                    .stage_flags = .{ .fragment_bit = true },
+                    .descriptor_type = convertShaderResourceType(resource.resource_type),
+                });
+            }
+        }
+
+        const layout_info = vk.DescriptorSetLayoutCreateInfo{
+            .s_type = .descriptor_set_layout_create_info,
+            .binding_count = @intCast(bindings.items.len),
+            .p_bindings = bindings.items.ptr
+        };
+
+        const set_layout = try self.device.createDescriptorSetLayout(&layout_info, self.instance.vk_allocator);
+        errdefer self.device.destroyDescriptorSetLayout(set_layout, self.instance.vk_allocator);
+        
+        var set_layouts: [MaxFramesInFlight]vk.DescriptorSetLayout = std.mem.zeroes([MaxFramesInFlight]vk.DescriptorSetLayout);
+        for (0..MaxFramesInFlight) |i| {
+            set_layouts[i] = set_layout;
+        }
+
+        const alloc_info = vk.DescriptorSetAllocateInfo{
+            .s_type = .descriptor_set_allocate_info,
+            .descriptor_pool = self.descriptor_pool,
+            .descriptor_set_count = MaxFramesInFlight,
+            .p_set_layouts = &set_layouts
+        };
+
+        var descriptor_sets: [MaxFramesInFlight]vk.DescriptorSet = std.mem.zeroes([MaxFramesInFlight]vk.DescriptorSet);
+        
+        try self.device.allocateDescriptorSets(&alloc_info, &descriptor_sets);
+
+        const set_layout_ptr: [1]vk.DescriptorSetLayout = [_]vk.DescriptorSetLayout{ set_layout };
+        
+        const pipeline_layout_info = vk.PipelineLayoutCreateInfo{
+            .s_type = .pipeline_layout_create_info,
+            .set_layout_count = 1,
+            .p_set_layouts = &set_layout_ptr,
+            .push_constant_range_count = 0,
+            .p_push_constant_ranges = null
+        };
+
+        const pipeline_layout = try self.device.createPipelineLayout(&pipeline_layout_info, self.instance.vk_allocator);
+        errdefer self.device.destroyPipelineLayout(pipeline_layout, self.instance.vk_allocator);
+
+        const pipeline_create_info = vk.GraphicsPipelineCreateInfo{
+            .s_type = .graphics_pipeline_create_info,
+            .stage_count = @intCast(shader_stages.len),
+            .p_stages = &shader_stages,
+            .p_vertex_input_state = &vertex_input_info,
+            .p_input_assembly_state = &input_assembly,
+            .p_viewport_state = &viewport_state,
+            .p_rasterization_state = &rasterizer,
+            .p_multisample_state = &multisampling,
+            .p_depth_stencil_state = &depth_stencil,
+            .p_color_blend_state = &color_blending,
+            .p_dynamic_state = &dynamic_state,
+            .layout = pipeline_layout,
+            .render_pass = pipeline_info.render_pass.render_pass,
+            .subpass = 0,
+            .base_pipeline_index = 0,
+        };
+
+        const pipeline_create_infos = [_]vk.GraphicsPipelineCreateInfo{ pipeline_create_info };
+        var pipelines: [1]vk.Pipeline = std.mem.zeroes([1]vk.Pipeline);
+
+        _ = try self.device.createGraphicsPipelines(.null_handle, 1, &pipeline_create_infos, self.instance.vk_allocator, &pipelines);
+        errdefer self.device.destroyPipeline(pipelines[0], self.instance.vk_allocator);
+
+        const pipeline_obj = GraphicsPipeline{
+            .allocator = self.allocator,
+            .device = self,
+            .pipeline_info = pipeline_info.*,
+            .vertex_shader = vertex_shader_module,
+            .pixel_shader = pixel_shader_module,
+            .set_layout = set_layout,
+            .descriptor_sets = descriptor_sets,
+            .pipeline_layout = pipeline_layout,
+            .pipeline = pipelines[0]
+        };
+
+        return pipeline_obj;
+    }
+
+    pub fn destroyGraphicsPipeline(self: *const Device, pipeline: *const GraphicsPipeline) void {
+        self.device.destroyPipeline(pipeline.pipeline, self.instance.vk_allocator);
+        self.device.destroyPipelineLayout(pipeline.pipeline_layout, self.instance.vk_allocator);
+        self.device.destroyDescriptorSetLayout(pipeline.set_layout, self.instance.vk_allocator);
+        self.device.destroyShaderModule(pipeline.pixel_shader, self.instance.vk_allocator);
+        self.device.destroyShaderModule(pipeline.vertex_shader, self.instance.vk_allocator);
     }
 
     pub fn getPhysicalDeviceName(self: *const Device, allocator: std.mem.Allocator) ![:0]const u8 {
@@ -436,7 +679,8 @@ fn isDeviceSuitable(instance: vk.InstanceProxy, allocator: std.mem.Allocator, de
         indices.isComplete() and
         extensions_supported and
         swapchainAdequate and
-        features.sampler_anisotropy == .true;
+        features.sampler_anisotropy == .true and
+        features.sample_rate_shading == .true;
 }
 
 pub fn findQueueFamilies(instance: vk.InstanceProxy, allocator: std.mem.Allocator, device: vk.PhysicalDevice, surface: vk.SurfaceKHR) !QueueFamilyIndices {
@@ -452,7 +696,7 @@ pub fn findQueueFamilies(instance: vk.InstanceProxy, allocator: std.mem.Allocato
         }
 
         const present_support = try instance.getPhysicalDeviceSurfaceSupportKHR(device, i, surface);
-        
+
         if (present_support == .true) {
             indices.present_family = i;
         }
@@ -496,4 +740,19 @@ pub fn findMemoryType(instance: vk.InstanceProxy, physical_device: vk.PhysicalDe
     }
 
     return error.NoSuitableMemoryType;
+}
+
+fn convertPrimitiveTopology(topology: PrimitiveTopology) vk.PrimitiveTopology {
+    switch (topology) {
+        .triangle_list => return .triangle_list,
+        .line_list => return .line_list,
+        .line_strip => return .line_strip
+    }
+}
+
+fn convertShaderResourceType(resource_type: ShaderResourceType) vk.DescriptorType {
+    return switch (resource_type) {
+        .texture => .sampled_image,
+        .sampler_state => .sampler
+    };
 }

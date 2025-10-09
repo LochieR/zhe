@@ -193,7 +193,8 @@ pub const Instance = struct {
         }
 
         const device_features: vk.PhysicalDeviceFeatures = .{
-            .sampler_anisotropy = .true
+            .sampler_anisotropy = .true,
+            .sample_rate_shading = .true
         };
 
         var device_extensions = try utils.StringArray.init(&self.allocator);

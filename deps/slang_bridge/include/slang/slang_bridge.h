@@ -63,8 +63,24 @@ typedef struct AllocatorInfo
     void* UserData;
 } AllocatorInfo;
 
+typedef struct VertexInputBindingData
+{
+    uint32_t Binding;
+    uint8_t InputRate;
+    uint32_t Stride;
+} VertexInputBindingData;
+
+typedef struct VertexInputAttributeData
+{
+    uint32_t Binding;
+    uint32_t Location;
+    uint32_t Offset;
+    int32_t Format;
+} VertexInputAttributeData;
+
 EXPORT ShaderLibrary* ShaderLibrary_init(const ShaderLibraryInfo* libraryInfo, ShaderLibraryResult* result);
 EXPORT void ShaderLibrary_deinit(ShaderLibrary* library);
 EXPORT ModuleReference* ShaderLibrary_loadModule(ShaderLibrary* library, const char* moduleName, ShaderLibraryResult* result);
 EXPORT EntryPointReference* ShaderLibrary_loadEntryPoint(ShaderLibrary* library, ModuleReference* moduleReference, const char* entryPointName, ShaderLibraryResult* result);
 EXPORT uint8_t* ShaderLibrary_createEntryPointCode(ShaderLibrary* library, ModuleReference* moduleReference, EntryPointReference* entryPointReference, ShaderLibraryResult* result, size_t* size, const AllocatorInfo* allocator);
+EXPORT void ShaderLibrary_reflectVertexInputLayout(ShaderLibrary* library, EntryPointReference* entryPoint, const AllocatorInfo* allocator, ShaderLibraryResult* result, const char* perVertexStructName, const char* perInstanceStructName, VertexInputBindingData** bindingData, size_t* bindingDataCount, VertexInputAttributeData** attributeData, size_t* attributeDataCount);

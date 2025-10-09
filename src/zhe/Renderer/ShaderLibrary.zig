@@ -61,11 +61,38 @@ fn createSlangResult(result: i32) !void {
     }
 }
 
+pub const ShaderResourceType = enum {
+    texture,
+    sampler_state,
+};
+
+pub const ShaderResource = struct {
+    resource_type: ShaderResourceType,
+    resource_count: u32,
+    binding: u32
+};
+
+pub const ShaderEntryPointInfo = struct {
+    name: [:0]const u8,
+
+    per_vertex_struct_name: ?[]const u8 = null,
+    per_instance_struct_name: ?[]const u8 = null,
+
+    shader_resources: ?[]const ShaderResource = null,
+};
+
 pub const ShaderEntryPoint = struct {
 
     shader_library_base: ?*slang.ShaderLibrary = null,
     module_reference_base: ?*slang.ModuleReference = null,
     entry_point_reference_base: ?*slang.EntryPointReference = null,
+
+    shader_resources: ?[]const ShaderResource = null,
+
+    per_vertex_struct_name: ?[]const u8 = null,
+    per_instance_struct_name: ?[]const u8 = null,
+
+    name: [:0]const u8,
 
     pub fn getShaderCode(self: *const ShaderEntryPoint, allocator: *std.mem.Allocator) ![]u8 {
         const allocatorInfo = slang.AllocatorInfo{
@@ -91,6 +118,47 @@ pub const ShaderEntryPoint = struct {
         return shader_code[0..size];
     }
 
+    pub fn reflectVertexInput(self: *const ShaderEntryPoint, allocator: *std.mem.Allocator) !struct { []slang.VertexInputBindingData, []slang.VertexInputAttributeData } {
+        const allocatorInfo = slang.AllocatorInfo{
+            .Allocate = allocate,
+            .Free = free,
+            .UserData = @as(?*anyopaque, @ptrCast(allocator)),
+        };
+
+        const vertex_cstr: [*c]const u8 = if (self.per_vertex_struct_name) |name|
+                name.ptr
+            else
+                null;
+        const instance_cstr: [*c]const u8 = if (self.per_instance_struct_name) |name|
+                name.ptr
+            else
+                null;
+
+        var binding_datas: [*c]slang.VertexInputBindingData = null;
+        var binding_data_count: usize = 0;
+        var attributes_datas: [*c]slang.VertexInputAttributeData = null;
+        var attribute_data_count: usize = 0;
+
+        var slang_result: slang.ShaderLibraryResult = 0;
+        slang.ShaderLibrary_reflectVertexInputLayout(
+            self.shader_library_base,
+            self.entry_point_reference_base,
+            @ptrCast(&allocatorInfo),
+            &slang_result,
+            vertex_cstr,
+            instance_cstr,
+            &binding_datas,
+            &binding_data_count,
+            &attributes_datas,
+            &attribute_data_count
+        );
+        if (slang_result != 0) {
+            try createSlangResult(slang_result);
+        }
+
+        return .{ binding_datas[0..binding_data_count], attributes_datas[0..attribute_data_count] };
+    }
+
     fn allocate(size: usize, user_data: ?*anyopaque) callconv(.c) ?*anyopaque {
         const allocator: *std.mem.Allocator = @ptrCast(@alignCast(user_data));
         const result = allocator.alloc(u8, size) catch {
@@ -114,8 +182,8 @@ pub const ShaderModule = struct {
     shader_library_base: ?*slang.ShaderLibrary = null,
     module_reference_base: ?*slang.ModuleReference = null,
 
-    pub fn loadEntryPoint(self: *const ShaderModule, name: [:0]const u8) !ShaderEntryPoint {
-        const name_cstr: [*c]const u8 = name;
+    pub fn loadEntryPoint(self: *const ShaderModule, info: ShaderEntryPointInfo) !ShaderEntryPoint {
+        const name_cstr: [*c]const u8 = info.name;
 
         var result: slang.ShaderLibraryResult = undefined;
         const reference = slang.ShaderLibrary_loadEntryPoint(self.shader_library_base, self.module_reference_base, name_cstr, &result);
@@ -126,7 +194,11 @@ pub const ShaderModule = struct {
         return ShaderEntryPoint{
             .shader_library_base = self.shader_library_base,
             .module_reference_base = self.module_reference_base,
-            .entry_point_reference_base = reference
+            .entry_point_reference_base = reference,
+            .name = info.name,
+            .per_vertex_struct_name = info.per_vertex_struct_name,
+            .per_instance_struct_name = info.per_instance_struct_name,
+            .shader_resources = info.shader_resources,
         };
     }
 

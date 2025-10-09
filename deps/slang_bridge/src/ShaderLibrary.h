@@ -133,6 +133,7 @@ namespace bridge {
     struct EntryPointReference
     {
         const char* Name;
+        uint32_t EntryPointIndex;
         Slang::ComPtr<slang::IEntryPoint> EntryPoint;
         Slang::ComPtr<slang::IComponentType> Program;
         Slang::ComPtr<slang::IComponentType> LinkedProgram;
@@ -145,6 +146,88 @@ namespace bridge {
         void* UserData;
     };
 
+    struct VertexInputBindingData
+    {
+        uint32_t Binding;
+        uint8_t InputRate;
+        uint32_t Stride;
+    };
+
+    enum class VertexInputFormat : int32_t
+    {
+        // from Vulkan
+
+        R8_SInt = 14,
+        R16_SInt = 75,
+        R32_SInt = 99,
+        R64_SInt = 111,
+
+        R8_UInt = 13,
+        R16_UInt = 74,
+        R32_UInt = 98,
+        R64_UInt = 110,
+
+        R16_SFloat = 76,
+        R32_SFloat = 100,
+        R64_SFloat = 112,
+
+        R8G8_SInt = 21,
+        R16G16_SInt = 82,
+        R32G32_SInt = 102,
+        R64G64_SInt = 114,
+
+        R8G8_UInt = 20,
+        R16G16_UInt = 81,
+        R32G32_UInt = 101,
+        R64G64_UInt = 113,
+
+        R16G16_SFloat = 83,
+        R32G32_SFloat = 103,
+        R64G64_SFloat = 115,
+
+        R8G8B8_SInt = 28,
+        R16G16B16_SInt = 89,
+        R32G32B32_SInt = 105,
+        R64G64B64_SInt = 117,
+
+        R8G8B8_UInt = 27,
+        R16G16B16_UInt = 88,
+        R32G32B32_UInt = 104,
+        R64G64B64_UInt = 116,
+
+        R16G16B16_SFloat = 90,
+        R32G32B32_SFloat = 106,
+        R64G64B64_SFloat = 118,
+
+        R8G8B8A8_SInt = 42,
+        R16G16B16A16_SInt = 96,
+        R32G32B32A32_SInt = 108,
+        R64G64B64A64_SInt = 120,
+
+        R8G8B8A8_UInt = 41,
+        R16G16B16A16_UInt = 95,
+        R32G32B32A32_UInt = 107,
+        R64G64B64A64_UInt = 119,
+
+        R16G16B16A16_SFloat = 97,
+        R32G32B32A32_SFloat = 109,
+        R64G64B64A64_SFloat = 121,
+    };
+
+    struct VertexInputAttributeData
+    {
+        uint32_t Binding;
+        uint32_t Location;
+        uint32_t Offset;
+        VertexInputFormat Format;
+    };
+
+    enum class ShaderResourceType : uint32_t
+    {
+        TextureResource = 0,
+        SamplerState
+    };
+
     class ShaderLibrary
     {
     public:
@@ -155,6 +238,8 @@ namespace bridge {
         EntryPointReference* loadEntryPoint(ModuleReference* moduleReference, const char* entryPointName, ShaderLibraryResult* result);
 
         uint8_t* createEntryPointCode(ModuleReference* moduleReference, EntryPointReference* entryPointReference, ShaderLibraryResult* result, size_t* size, const AllocatorInfo* allocator);
+
+        void reflectVertexInputLayout(EntryPointReference* entryPoint, const AllocatorInfo* allocator, ShaderLibraryResult* result, const char* perVertexStructName, const char* perInstanceStructName, VertexInputBindingData** bindingData, size_t* bindingDataCount, VertexInputAttributeData** attributeData, size_t* attributeDataCount);
 
         static ShaderLibrary* init(const ShaderLibraryInfo* libraryInfo, ShaderLibraryResult* result);
         static void deinit(ShaderLibrary* library);

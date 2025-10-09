@@ -14,9 +14,23 @@ const ZheError = error{
     FailedToCreateWindow
 };
 
-const Foo = struct {
-    values: []i32
+const ShaderContext = struct {
+    shader_library: zhe.ShaderLibrary,
+    basic_module: zhe.ShaderModule,
+    basic_vertex_entry_point: zhe.ShaderEntryPoint,
+    basic_pixel_entry_point: zhe.ShaderEntryPoint,
 };
+
+const WorkerArgs = struct {
+    allocator: std.mem.Allocator,
+    mutex: *std.Thread.Mutex,
+    output: *?ShaderContext,
+    result: *?anyerror,
+};
+
+fn createErrorUnion(err: anyerror) !void {
+    return err;
+}
 
 pub fn main() !void {
     if (c.glfwInit() != c.GLFW_TRUE) {
@@ -56,6 +70,20 @@ pub fn main() !void {
             _ = gpa.deinit();
         }
     }
+
+    // begin shader compilation
+    var shader_context: ?ShaderContext = null;
+    var mutex = std.Thread.Mutex{};
+    var result: ?anyerror = null;
+
+    var worker_args = WorkerArgs{
+        .allocator = allocator,
+        .mutex = &mutex,
+        .output = &shader_context,
+        .result = &result
+    };
+
+    const worker = try std.Thread.spawn(.{}, compileShaders, .{ &worker_args });
 
     const instance_info = zhe.InstanceInfo{
         .app_name = "zheditor",
@@ -107,22 +135,29 @@ pub fn main() !void {
     var render_pass = try device.createRenderPass(&swapchain, &render_pass_info);
     defer device.destroyRenderPass(&render_pass);
 
-    const shader_library = try zhe.ShaderLibrary.init(allocator);
-    defer shader_library.deinit();
+    worker.join();
+    mutex.lock();
+    
+    if (result) |res| {
+        try createErrorUnion(res);
+    }
+    const shader = shader_context orelse {
+        mutex.unlock();
+        std.debug.print("compile failed", .{});
+        return;
+    };
 
-    const basic_module = try shader_library.loadModule("basic");
-    const basic_vertex_main = try basic_module.loadEntryPoint("vertexMain");
-    const basic_pixel_main = try basic_module.loadEntryPoint("pixelMain");
+    defer shader.shader_library.deinit();
 
     const graphics_pipeline_info = zhe.GraphicsPipelineInfo{
-        .vertex_shader = basic_vertex_main,
-        .pixel_shader = basic_pixel_main,
+        .vertex_shader = shader.basic_vertex_entry_point,
+        .pixel_shader = shader.basic_pixel_entry_point,
         .primitive_topology = .triangle_list,
         .render_pass = &render_pass
     };
-    
+
     const graphics_pipeline = try device.createGraphicsPipeline(&graphics_pipeline_info);
-    _ = graphics_pipeline;
+    defer device.destroyGraphicsPipeline(&graphics_pipeline);
 
     c.glfwShowWindow(window);
     while (c.glfwWindowShouldClose(window) == c.GLFW_FALSE) {
@@ -130,14 +165,72 @@ pub fn main() !void {
     }
 }
 
-///
-/// const shader_library = zhe.ShaderLibrary.init("shaders/");
-/// 
-/// const graphics_pipeline = device.createGraphicsPipeline(.{
-///     .vertex_shader = shader_library.loadEntryPoint("main", "basicVertex"),
-///     .pixel_shader = shader_library.loadEntryPoint("main", "basicPixel"),
-/// })
-/// 
+fn compileShaders(args: *WorkerArgs) void {
+    const shader_library = zhe.ShaderLibrary.init(args.allocator) catch |err| {
+        args.mutex.lock();
+        args.output.* = null;
+        args.result.* = err;
+        args.mutex.unlock();
+        return;
+    };
+
+    const vertex_entry_point_info = zhe.ShaderEntryPointInfo{
+        .name = "vertexMain",
+        .per_vertex_struct_name = "PerVertexInput"
+    };
+
+    const pixel_resources = [_]zhe.ShaderResource {
+        zhe.ShaderResource{
+            .binding = 0,
+            .resource_type = .texture,
+            .resource_count = 1
+        },
+        zhe.ShaderResource{
+            .binding = 1,
+            .resource_type = .sampler_state,
+            .resource_count = 1
+        }
+    };
+
+    const pixel_entry_point_info = zhe.ShaderEntryPointInfo{
+        .name = "pixelMain",
+        .shader_resources = pixel_resources[0..]
+    };
+
+    const basic_module = shader_library.loadModule("basic") catch |err| {
+        args.mutex.lock();
+        args.output.* = null;
+        args.result.* = err;
+        args.mutex.unlock();
+        return;
+    };
+    const basic_vertex_main = basic_module.loadEntryPoint(vertex_entry_point_info) catch |err| {
+        args.mutex.lock();
+        args.output.* = null;
+        args.result.* = err;
+        args.mutex.unlock();
+        return;
+    };
+    const basic_pixel_main = basic_module.loadEntryPoint(pixel_entry_point_info) catch |err| {
+        args.mutex.lock();
+        args.output.* = null;
+        args.result.* = err;
+        args.mutex.unlock();
+        return;
+    };
+
+    const context = ShaderContext{
+        .shader_library = shader_library,
+        .basic_module = basic_module,
+        .basic_vertex_entry_point = basic_vertex_main,
+        .basic_pixel_entry_point = basic_pixel_main
+    };
+
+    args.mutex.lock();
+    args.output.* = context;
+    args.result.* = null;
+    args.mutex.unlock();
+}
 
 const LoggingAllocator = struct {
     const Self = @This();

@@ -34,7 +34,7 @@ EntryPointReference* ShaderLibrary_loadEntryPoint(ShaderLibrary* library, Module
             reinterpret_cast<bridge::ModuleReference*>(moduleReference),
             entryPointName,
             reinterpret_cast<bridge::ShaderLibraryResult*>(result)
-        )    
+        )
     );
 }
 
@@ -46,5 +46,20 @@ uint8_t* ShaderLibrary_createEntryPointCode(ShaderLibrary* library, ModuleRefere
         reinterpret_cast<bridge::ShaderLibraryResult*>(result),
         size,
         reinterpret_cast<const bridge::AllocatorInfo*>(allocator)
+    );
+}
+
+void ShaderLibrary_reflectVertexInputLayout(ShaderLibrary* library, EntryPointReference* entryPoint, const AllocatorInfo* allocator, ShaderLibraryResult* result, const char* perVertexStructName, const char* perInstanceStructName, VertexInputBindingData** bindingData, size_t* bindingDataCount, VertexInputAttributeData** attributeData, size_t* attributeDataCount)
+{
+    reinterpret_cast<bridge::ShaderLibrary*>(library)->reflectVertexInputLayout(
+        reinterpret_cast<bridge::EntryPointReference*>(entryPoint),
+        reinterpret_cast<const bridge::AllocatorInfo*>(allocator),
+        reinterpret_cast<bridge::ShaderLibraryResult*>(result),
+        perVertexStructName,
+        perInstanceStructName,
+        reinterpret_cast<bridge::VertexInputBindingData**>(bindingData),
+        bindingDataCount,
+        reinterpret_cast<bridge::VertexInputAttributeData**>(attributeData),
+        attributeDataCount
     );
 }
