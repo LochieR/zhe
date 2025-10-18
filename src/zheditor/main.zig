@@ -3,9 +3,16 @@ const zhe = @import("zhe");
 const vk = @import("vulkan");
 const builtin = @import("builtin");
 
+const windows = @cImport({
+    @cInclude("windows.h");
+    @cInclude("dwmapi.h");
+});
+
 const c = @cImport({
     @cDefine("GLFW_INCLUDE_NONE", {});
     @cInclude("GLFW/glfw3.h");
+    @cDefine("GLFW_EXPOSE_NATIVE_WIN32", {});
+    @cInclude("GLFW/glfw3native.h");
 });
 
 const ZheError = error{
@@ -26,6 +33,18 @@ const WorkerArgs = struct {
     mutex: *std.Thread.Mutex,
     output: *?ShaderContext,
     result: *?anyerror,
+};
+
+const Vertex = struct {
+    position: @Vector(4, f32),
+    color: @Vector(4, f32),
+    tex_coord: @Vector(4, f32)
+};
+
+const f4x4 = [4]@Vector(4, f32);
+
+const CameraData = struct {
+    view_projection: f4x4
 };
 
 fn createErrorUnion(err: anyerror) !void {
@@ -54,6 +73,12 @@ pub fn main() !void {
         null
     ) orelse return error.FailedToCreateWindow;
     defer c.glfwDestroyWindow(window);
+
+    //const margins = windows.MARGINS{ .cxLeftWidth = 0, .cxRightWidth = 0, .cyTopHeight = 1, .cyBottomHeight = 0 };
+    //const hwnd = c.glfwGetWin32Window(window);
+    //_ = windows.DwmExtendFrameIntoClientArea(@ptrCast(hwnd), &margins);
+    //_ = windows.SetWindowLongA(@ptrCast(hwnd), windows.GWL_STYLE, windows.WS_OVERLAPPEDWINDOW & ~windows.WS_CAPTION);
+    //_ = windows.SetWindowLongA(@ptrCast(hwnd), windows.GWL_EXSTYLE, windows.WS_EX_APPWINDOW | windows.WS_EX_WINDOWEDGE);
 
     var allocator: std.mem.Allocator = undefined;
     var gpa: std.heap.GeneralPurposeAllocator(.{}) = undefined;
@@ -101,8 +126,8 @@ pub fn main() !void {
         .present_mode = .mailbox_or_fifo
     };
 
-    var swapchain = try device.createSwapchain(&swapchain_info);
-    defer device.destroySwapchain(&swapchain);
+    const swapchain = try device.createSwapchain(&swapchain_info);
+    defer device.destroySwapchain(swapchain);
 
     const color_attachment = zhe.AttachmentInfo{
         .format = .swapchain_color_default,
@@ -132,7 +157,7 @@ pub fn main() !void {
         .attachments = &attachments,
     };
 
-    var render_pass = try device.createRenderPass(&swapchain, &render_pass_info);
+    var render_pass = try device.createRenderPass(swapchain, &render_pass_info);
     defer device.destroyRenderPass(&render_pass);
 
     worker.join();
@@ -149,20 +174,129 @@ pub fn main() !void {
 
     defer shader.shader_library.deinit();
 
+    var shader_resource_layout = zhe.ShaderResourceLayout{
+        .sets = &[_]zhe.ShaderResourceSet {
+            zhe.ShaderResourceSet{
+                .resources = &[_]zhe.ResourceLayoutItem{
+                    .{
+                        .binding = 0,
+                        .resource_type = .constant_buffer,
+                        .resource_array_count = 1,
+                        .stage = .vertex
+                    }
+                }
+            }
+        },
+    };
+
+    try device.initShaderResourceLayout(&shader_resource_layout);
+    defer device.deinitShaderResourceLayout(&shader_resource_layout);
+
     const graphics_pipeline_info = zhe.GraphicsPipelineInfo{
         .vertex_shader = shader.basic_vertex_entry_point,
         .pixel_shader = shader.basic_pixel_entry_point,
         .primitive_topology = .triangle_list,
-        .render_pass = &render_pass
+        .render_pass = &render_pass,
+        .shader_resource_layout = shader_resource_layout
     };
 
     const graphics_pipeline = try device.createGraphicsPipeline(&graphics_pipeline_info);
     defer device.destroyGraphicsPipeline(&graphics_pipeline);
 
+    const indices = [_]u32 {
+        0, 1, 2, 2, 3, 0
+    };
+    const index_buffer = try device.createBufferWithData(.index_buffer, std.mem.sliceAsBytes(indices[0..indices.len]));
+    defer device.destroyBuffer(&index_buffer);
+
+    const vertices = [_]Vertex {
+        .{
+            .position = @Vector(4, f32){ -0.5, -0.5, 0.0, 1.0 },
+            .color = @Vector(4, f32){ 0.6, 0.3, 0.8, 1.0 },
+            .tex_coord = @Vector(4, f32){ 0.0, 0.0, 0.0, 0.0 },
+        },
+        .{
+            .position = @Vector(4, f32){ 0.5, -0.5, 0.0, 1.0 },
+            .color = @Vector(4, f32){ 0.4, 0.1, 0.6, 1.0 },
+            .tex_coord = @Vector(4, f32){ 1.0, 0.0, 0.0, 0.0 },
+        },
+        .{
+            .position = @Vector(4, f32){ 0.5, 0.5, 0.0, 1.0 },
+            .color = @Vector(4, f32){ 0.1, 0.7, 0.5, 1.0 },
+            .tex_coord = @Vector(4, f32){ 1.0, 1.0, 0.0, 0.0 },
+        },
+        .{
+            .position = @Vector(4, f32){ -0.5, 0.5, 0.0, 1.0 },
+            .color = @Vector(4, f32){ 0.8, 0.3, 0.6, 1.0 },
+            .tex_coord = @Vector(4, f32){ 0.0, 1.0, 0.0, 0.0 },
+        }
+    };
+
+    var vertex_buffer = try device.createBufferWithData(.vertex_buffer, std.mem.sliceAsBytes(vertices[0..vertices.len]));
+    defer device.destroyBuffer(&vertex_buffer);
+
+    var vertex_buffers = try std.ArrayList(*const zhe.Buffer).initCapacity(allocator, 1);
+    defer vertex_buffers.deinit(allocator);
+    vertex_buffers.appendAssumeCapacity(&vertex_buffer);
+
+    var command_list = device.createCommandList();
+    defer device.destroyCommandList(&command_list);
+
+    const aspect = @as(f32, @floatFromInt(swapchain.extent.width)) / @as(f32, @floatFromInt(swapchain.extent.height));
+
+    var constant_buffer = try device.createBuffer(.constant_buffer, @sizeOf(CameraData));
+    defer device.destroyBuffer(&constant_buffer);
+
+    const camera_data = CameraData{
+        .view_projection = ortho(-aspect, aspect, -1.0, 1.0, 0.0, 1.0)
+    };
+    try constant_buffer.setData(std.mem.asBytes(&camera_data), 0);
+
+    const constant_buffer_resource = try device.createShaderResource(0, &shader_resource_layout);
+    constant_buffer_resource.update(&constant_buffer, 0, 0);
+
     c.glfwShowWindow(window);
     while (c.glfwWindowShouldClose(window) == c.GLFW_FALSE) {
+        try device.beginFrame();
+
+        command_list.begin();
+
+        try command_list.beginRenderPass(&render_pass);
+        try command_list.bindPipeline(&graphics_pipeline);
+        try command_list.bindShaderResource(0, &constant_buffer_resource);
+        try command_list.setViewport(@Vector(2, f32){ 0.0, 0.0 }, @Vector(2, f32){ @floatFromInt(swapchain.extent.width), @floatFromInt(swapchain.extent.height) }, 0.0, 1.0);
+        try command_list.setScissor(@Vector(2, f32){ 0.0, 0.0 }, @Vector(2, f32){ @floatFromInt(swapchain.extent.width), @floatFromInt(swapchain.extent.height) });
+        try command_list.bindVertexBuffers(vertex_buffers.items);
+        try command_list.bindIndexBuffer(&index_buffer);
+
+        try command_list.drawIndexed(6, 0, 0);
+
+        try command_list.endRenderPass();
+
+        try command_list.end();
+        try device.submitCommandList(&command_list);
+
+        try device.endFrame();
         c.glfwPollEvents();
     }
+}
+
+fn ortho(left: f32, right: f32, bottom: f32, top: f32, near: f32, far: f32) f4x4 {
+    const rl = right - left;
+    const tb = top - bottom;
+    const fn_ = far - near;
+
+    return .{
+        .{ 2.0 / rl, 0.0, 0.0, 0.0 },
+        .{ 0.0, 2.0 / tb, 0.0, 0.0 },
+        .{ 0.0, 0.0, 1.0 / fn_, 0.0 },
+        .{ 
+            -(right + left) / rl,
+            -(top + bottom) / tb,
+            -near / fn_,
+            1.0
+        }
+    };
 }
 
 fn compileShaders(args: *WorkerArgs) void {
@@ -176,25 +310,11 @@ fn compileShaders(args: *WorkerArgs) void {
 
     const vertex_entry_point_info = zhe.ShaderEntryPointInfo{
         .name = "vertexMain",
-        .per_vertex_struct_name = "PerVertexInput"
-    };
-
-    const pixel_resources = [_]zhe.ShaderResource {
-        zhe.ShaderResource{
-            .binding = 0,
-            .resource_type = .texture,
-            .resource_count = 1
-        },
-        zhe.ShaderResource{
-            .binding = 1,
-            .resource_type = .sampler_state,
-            .resource_count = 1
-        }
+        .per_vertex_struct_name = "PerVertexInput",
     };
 
     const pixel_entry_point_info = zhe.ShaderEntryPointInfo{
         .name = "pixelMain",
-        .shader_resources = pixel_resources[0..]
     };
 
     const basic_module = shader_library.loadModule("basic") catch |err| {

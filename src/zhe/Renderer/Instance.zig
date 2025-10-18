@@ -13,6 +13,9 @@ const c = @cImport({
 });
 
 const Device = @import("Device.zig").Device;
+const Swapchain = @import("Swapchain.zig").Swapchain;
+const CommandListData = @import("Device.zig").CommandListData;
+
 const ResourceFreeContext = @import("Device.zig").ResourceFreeContext;
 const pickPhysicalDevice = @import("Device.zig").pickPhysicalDevice;
 const findQueueFamilies = @import("Device.zig").findQueueFamilies;
@@ -280,10 +283,15 @@ pub const Instance = struct {
             .physical_device = physical_device,
             .command_pool = command_pool,
             .descriptor_pool = descriptor_pool,
+            .secondary_command_buffers = [_]std.ArrayListUnmanaged(vk.CommandBuffer) { .{} } ** MaxFramesInFlight,
+            .used_secondary_command_buffer_count = [_]u32{ 0 } ** MaxFramesInFlight,
+            .submitted_command_lists = [_]std.ArrayListUnmanaged(CommandListData) { .{} } ** MaxFramesInFlight,
+            .frame_command_buffers = [_]vk.CommandBuffer { .null_handle } ** MaxFramesInFlight,
+            .swapchain = null,
             .frame_index = 0,
             .skip_frame = false,
             .image_available_semaphores = .{ .null_handle, .null_handle },
-            .render_finished_semaphores = .{ .null_handle, .null_handle },
+            .render_finished_semaphores = .{},
             .in_flight_fences = .{ .null_handle, .null_handle }
         };
 
@@ -294,14 +302,12 @@ pub const Instance = struct {
 
         for (0..MaxFramesInFlight) |i| {
             device_obj.image_available_semaphores[i] = try device_proxy.createSemaphore(&semaphore_info, self.vk_allocator);
-            device_obj.render_finished_semaphores[i] = try device_proxy.createSemaphore(&semaphore_info, self.vk_allocator);
             device_obj.in_flight_fences[i] = try device_proxy.createFence(&fence_info, self.vk_allocator);
         }
 
         errdefer {
             for (0..MaxFramesInFlight) |i| {
                 device_proxy.destroySemaphore(device_obj.image_available_semaphores[i], self.vk_allocator);
-                device_proxy.destroySemaphore(device_obj.render_finished_semaphores[i], self.vk_allocator);
                 device_proxy.destroyFence(device_obj.in_flight_fences[i], self.vk_allocator);
             }
         }
@@ -310,15 +316,42 @@ pub const Instance = struct {
         std.debug.print("Using GPU: {s}\n", .{device_name});
         self.allocator.free(@as([]const u8, @ptrCast(device_name)));
 
+        for (0..MaxFramesInFlight) |i| {
+            try device_obj.secondary_command_buffers[i].appendNTimes(self.allocator, .null_handle, 10);
+
+            const alloc_info = vk.CommandBufferAllocateInfo{
+                .s_type = .command_buffer_allocate_info,
+                .command_pool = device_obj.command_pool,
+                .command_buffer_count = 10,
+                .level = .secondary,
+            };
+
+            try device_obj.device.allocateCommandBuffers(&alloc_info, device_obj.secondary_command_buffers[i].items.ptr);
+        }
+        
+        const alloc_info = vk.CommandBufferAllocateInfo{
+            .s_type = .command_buffer_allocate_info,
+            .command_pool = device_obj.command_pool,
+            .command_buffer_count = MaxFramesInFlight,
+            .level = .primary
+        };
+        try device_obj.device.allocateCommandBuffers(&alloc_info, &device_obj.frame_command_buffers);
+
         return device_obj;
     }
 
     pub fn destroyDevice(self: *const Instance, device: *Device) void {
         for (0..MaxFramesInFlight) |i| {
+            device.secondary_command_buffers[i].deinit(self.allocator);
+            device.submitted_command_lists[i].deinit(self.allocator);
+
             device.device.destroySemaphore(device.image_available_semaphores[i], self.vk_allocator);
-            device.device.destroySemaphore(device.render_finished_semaphores[i], self.vk_allocator);
             device.device.destroyFence(device.in_flight_fences[i], self.vk_allocator);
         }
+        for (device.render_finished_semaphores.items) |semaphore| {
+            device.device.destroySemaphore(semaphore, self.vk_allocator);
+        }
+        device.render_finished_semaphores.deinit(self.allocator);
 
         device.device.destroyDescriptorPool(device.descriptor_pool, self.vk_allocator);
         device.device.destroyCommandPool(device.command_pool, self.vk_allocator);

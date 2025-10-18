@@ -2,8 +2,12 @@ const std = @import("std");
 const vk = @import("vulkan");
 
 const Device = @import("Device.zig").Device;
+const Buffer = @import("Buffer.zig").Buffer;
 const RenderPass = @import("RenderPass.zig").RenderPass;
 const ShaderEntryPoint = @import("ShaderLibrary.zig").ShaderEntryPoint;
+const ShaderStage = @import("ShaderLibrary.zig").ShaderStage;
+const ShaderResourceType = @import("ShaderLibrary.zig").ShaderResourceType;
+const ShaderResourceLayout = @import("ShaderResource.zig").ShaderResourceLayout;
 
 const MaxFramesInFlight = @import("Instance.zig").MaxFramesInFlight;
 
@@ -13,39 +17,18 @@ pub const PrimitiveTopology = enum {
     line_strip
 };
 
-pub const ShaderType = enum {
-    vertex,
-    pixel
-};
-
 pub const PushConstantInfo = struct {
     size: usize,
     offset: usize,
-    shader_type: ShaderType
-};
-
-pub const ShaderResourceType = enum {
-    uniform_buffer,
-    combined_image_sampler,
-    sampled_image,
-    sampler,
-    storage_buffer,
-    storage_image
-};
-
-pub const ShaderResourceInfo = struct {
-    resource_type: ShaderResourceType,
-    set: u32,
-    binding: u32,
-    shader: ShaderType,
-    resource_count: u32 = 1
+    shader_type: ShaderStage
 };
 
 pub const GraphicsPipelineInfo = struct {
     vertex_shader: ShaderEntryPoint,
     pixel_shader: ShaderEntryPoint,
     primitive_topology: PrimitiveTopology,
-    render_pass: *RenderPass
+    render_pass: *RenderPass,
+    shader_resource_layout: ShaderResourceLayout,
 };
 
 pub const GraphicsPipeline = struct {
@@ -57,11 +40,10 @@ pub const GraphicsPipeline = struct {
 
     vertex_shader: vk.ShaderModule,
     pixel_shader: vk.ShaderModule,
-    set_layout: vk.DescriptorSetLayout,
 
-    descriptor_sets: [MaxFramesInFlight]vk.DescriptorSet,
+    resource_layout: ShaderResourceLayout,
 
     pipeline_layout: vk.PipelineLayout,
     pipeline: vk.Pipeline,
-    
+
 };

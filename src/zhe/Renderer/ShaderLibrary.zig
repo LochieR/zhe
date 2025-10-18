@@ -62,14 +62,12 @@ fn createSlangResult(result: i32) !void {
 }
 
 pub const ShaderResourceType = enum {
-    texture,
-    sampler_state,
-};
-
-pub const ShaderResource = struct {
-    resource_type: ShaderResourceType,
-    resource_count: u32,
-    binding: u32
+    constant_buffer,
+    combined_image_sampler,
+    sampled_image,
+    sampler,
+    storage_buffer,
+    storage_image
 };
 
 pub const ShaderEntryPointInfo = struct {
@@ -77,8 +75,12 @@ pub const ShaderEntryPointInfo = struct {
 
     per_vertex_struct_name: ?[]const u8 = null,
     per_instance_struct_name: ?[]const u8 = null,
+};
 
-    shader_resources: ?[]const ShaderResource = null,
+pub const ShaderStage = enum {
+    vertex,
+    pixel,
+    compute
 };
 
 pub const ShaderEntryPoint = struct {
@@ -86,8 +88,6 @@ pub const ShaderEntryPoint = struct {
     shader_library_base: ?*slang.ShaderLibrary = null,
     module_reference_base: ?*slang.ModuleReference = null,
     entry_point_reference_base: ?*slang.EntryPointReference = null,
-
-    shader_resources: ?[]const ShaderResource = null,
 
     per_vertex_struct_name: ?[]const u8 = null,
     per_instance_struct_name: ?[]const u8 = null,
@@ -198,7 +198,6 @@ pub const ShaderModule = struct {
             .name = info.name,
             .per_vertex_struct_name = info.per_vertex_struct_name,
             .per_instance_struct_name = info.per_instance_struct_name,
-            .shader_resources = info.shader_resources,
         };
     }
 

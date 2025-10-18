@@ -20,12 +20,25 @@ const RenderPassInfo = @import("RenderPass.zig").RenderPassInfo;
 const GraphicsPipeline = @import("GraphicsPipeline.zig").GraphicsPipeline;
 const GraphicsPipelineInfo = @import("GraphicsPipeline.zig").GraphicsPipelineInfo;
 const PrimitiveTopology = @import("GraphicsPipeline.zig").PrimitiveTopology;
+const ShaderStage = @import("ShaderLibrary.zig").ShaderStage;
 const ShaderResourceType = @import("ShaderLibrary.zig").ShaderResourceType;
+const Buffer = @import("Buffer.zig").Buffer;
+const BufferType = @import("Buffer.zig").BufferType;
+const CommandList = @import("CommandList.zig").CommandList;
+const CommandScope = @import("CommandList.zig").CommandScope;
+const CommandScopeType = @import("CommandList.zig").CommandScopeType;
+const NativeCommand = @import("CommandList.zig").NativeCommand;
+const NativeCommandVTable = @import("CommandList.zig").NativeCommandVTable;
+const ShaderResource = @import("ShaderResource.zig").ShaderResource;
+const ShaderResourceLayout = @import("ShaderResource.zig").ShaderResourceLayout;
+const ResourceLayoutItem = @import("ShaderResource.zig").ResourceLayoutItem;
 
 pub const DeviceError = error {
     NoValidGPUs,
     NoSuitableMemoryType,
-    InvalidPresentMode
+    InvalidPresentMode,
+    SubmitWhileRecording,
+    NotSingleTimeCommands,
 };
 
 const deviceExtensions = [_][:0]const u8 {
@@ -39,6 +52,12 @@ const QueueFamilyIndices = struct {
     pub fn isComplete(self: QueueFamilyIndices) bool {
         return self.graphics_family != std.math.maxInt(u32) and self.present_family != std.math.maxInt(u32);
     }
+};
+
+pub const CommandListData = struct {
+    buffers: std.ArrayListUnmanaged(vk.CommandBuffer) = .{},
+    types: std.ArrayListUnmanaged(CommandScopeType) = .{},
+    render_passes: std.ArrayListUnmanaged(?*RenderPass) = .{},
 };
 
 const querySwapchainSupport = @import("Swapchain.zig").querySwapchainSupport;
@@ -65,15 +84,335 @@ pub const Device = struct {
     command_pool: vk.CommandPool,
     descriptor_pool: vk.DescriptorPool,
 
+    secondary_command_buffers: [MaxFramesInFlight]std.ArrayListUnmanaged(vk.CommandBuffer),
+    used_secondary_command_buffer_count: [MaxFramesInFlight]u32,
+
+    submitted_command_lists: [MaxFramesInFlight]std.ArrayListUnmanaged(CommandListData),
+
+    frame_command_buffers: [MaxFramesInFlight]vk.CommandBuffer,
+
     frame_index: u32,
 
     skip_frame: bool,
 
+    swapchain: ?Swapchain,
+
     image_available_semaphores: [MaxFramesInFlight]vk.Semaphore,
-    render_finished_semaphores: [MaxFramesInFlight]vk.Semaphore,
+    render_finished_semaphores: std.ArrayListUnmanaged(vk.Semaphore),
     in_flight_fences: [MaxFramesInFlight]vk.Fence,
 
-    pub fn createSwapchain(self: *Device, swapchain_info: *const SwapchainInfo) !Swapchain {
+    pub fn beginFrame(self: *Device) !void {
+        _ = try self.device.waitForFences(1, self.in_flight_fences[self.frame_index..(self.frame_index + 1)].ptr, .true, std.math.maxInt(u64));
+        if (self.swapchain) |_| {
+            try self.swapchain.?.acquireNextImage();
+        }
+        try self.device.resetFences(1, self.in_flight_fences[self.frame_index..(self.frame_index + 1)].ptr);
+    }
+
+    pub fn endFrame(self: *Device) !void {
+        if (self.skip_frame) {
+            self.skip_frame = false;
+            try self.device.deviceWaitIdle();
+
+            return;
+        }
+
+        const wait_stages = [_]vk.PipelineStageFlags { .{ .color_attachment_output_bit = true } };
+
+        const begin_info = vk.CommandBufferBeginInfo{
+            .s_type = .command_buffer_begin_info
+        };
+
+        try self.device.beginCommandBuffer(self.frame_command_buffers[self.frame_index], &begin_info);
+
+        for (self.submitted_command_lists[self.frame_index].items) |command_list| {
+            for (0..command_list.types.items.len) |i| {
+                const list_type = command_list.types.items[i];
+                const render_pass = command_list.render_passes.items[i];
+
+                if (list_type == .render_pass) {
+                    const clear_values = [_]vk.ClearValue {
+                        .{
+                            .color = vk.ClearColorValue{ .float_32 = [_]f32 { 0.0, 0.0, 0.0, 0.0 } },
+                        },
+                        .{
+                            .depth_stencil = vk.ClearDepthStencilValue{ .depth = 1.0, .stencil = 0 }
+                        }
+                    };
+
+                    const render_pass_info = vk.RenderPassBeginInfo{
+                        .s_type = .render_pass_begin_info,
+                        .render_area = .{ .extent = self.swapchain.?.extent, .offset = .{ .x = 0, .y = 0 } },
+                        .render_pass = render_pass.?.render_pass,
+                        .framebuffer = render_pass.?.framebuffers.items[self.swapchain.?.image_index],
+                        .clear_value_count = clear_values.len,
+                        .p_clear_values = &clear_values,
+                    };
+
+                    self.device.cmdBeginRenderPass(self.frame_command_buffers[self.frame_index], &render_pass_info, .secondary_command_buffers);
+                }
+
+                self.device.cmdExecuteCommands(self.frame_command_buffers[self.frame_index], 1, command_list.buffers.items[i..(i + 1)].ptr);
+
+                if (list_type == .render_pass) {
+                    self.device.cmdEndRenderPass(self.frame_command_buffers[self.frame_index]);
+                }
+            }
+        }
+
+        try self.device.endCommandBuffer(self.frame_command_buffers[self.frame_index]);
+
+        const submit = [_]vk.SubmitInfo {
+            .{
+                .s_type = .submit_info,
+                .command_buffer_count = 1,
+                .p_command_buffers = self.frame_command_buffers[self.frame_index..(self.frame_index + 1)].ptr,
+                .wait_semaphore_count = 1,
+                .p_wait_semaphores = self.image_available_semaphores[self.frame_index..(self.frame_index + 1)].ptr,
+                .p_wait_dst_stage_mask = &wait_stages,
+                .signal_semaphore_count = 1,
+                .p_signal_semaphores = self.render_finished_semaphores.items[self.swapchain.?.image_index..(self.swapchain.?.image_index + 1)].ptr,
+            }
+        };
+
+        try self.device.queueSubmit(self.graphics_queue, 1, &submit, self.in_flight_fences[self.frame_index]);
+
+        const swapchains = [_]vk.SwapchainKHR { self.swapchain.?.swapchain };
+        const image_indices = [_]u32 { self.swapchain.?.image_index };
+
+        const present_info = vk.PresentInfoKHR{
+            .s_type = .present_info_khr,
+            .wait_semaphore_count = 1,
+            .p_wait_semaphores = self.render_finished_semaphores.items[self.swapchain.?.image_index..(self.swapchain.?.image_index + 1)].ptr,
+            .swapchain_count = 1,
+            .p_swapchains = &swapchains,
+            .p_image_indices = &image_indices,
+        };
+
+        const result = try self.device.queuePresentKHR(self.present_queue, &present_info);
+        if (result == .suboptimal_khr) {
+            try self.swapchain.?.recreateSwapchain();
+        }
+
+        for (0..self.submitted_command_lists[self.frame_index].items.len) |i| {
+            self.submitted_command_lists[self.frame_index].items[i].buffers.deinit(self.allocator);
+            self.submitted_command_lists[self.frame_index].items[i].render_passes.deinit(self.allocator);
+            self.submitted_command_lists[self.frame_index].items[i].types.deinit(self.allocator);
+        }
+
+        self.submitted_command_lists[self.frame_index].clearRetainingCapacity();
+        self.used_secondary_command_buffer_count[self.frame_index] = 0;
+
+        self.frame_index = (self.frame_index + 1) % MaxFramesInFlight;
+    }
+
+    pub fn submitCommandList(self: *Device, command_list: *const CommandList) !void {
+        if (self.skip_frame) {
+            return;
+        }
+
+        if (command_list.is_recording) {
+            return error.SubmitWhileRecording;
+        }
+
+        var command_list_data = CommandListData{};
+
+        for (command_list.scopes.items) |scope| {
+            if (scope.commands.items.len == 0) {
+                continue;
+            }
+
+            var command_buffer: vk.CommandBuffer = .null_handle;
+
+            if (self.used_secondary_command_buffer_count[self.frame_index] < self.secondary_command_buffers[self.frame_index].items.len) {
+                command_buffer = self.secondary_command_buffers[self.frame_index].items[self.used_secondary_command_buffer_count[self.frame_index]];
+                self.used_secondary_command_buffer_count[self.frame_index] += 1;
+            } else {
+                const alloc_info = vk.CommandBufferAllocateInfo{
+                    .s_type = .command_buffer_allocate_info,
+                    .command_pool = self.command_pool,
+                    .command_buffer_count = 1,
+                    .level = .secondary,
+                };
+
+                var temp_cmd = [_]vk.CommandBuffer { .null_handle };
+                try self.device.allocateCommandBuffers(&alloc_info, &temp_cmd);
+
+                command_buffer = temp_cmd[0];
+                try self.secondary_command_buffers[self.frame_index].append(self.allocator, command_buffer);
+                self.used_secondary_command_buffer_count[self.frame_index] += 1;
+            }
+
+            var inheritance_info = std.mem.zeroes(vk.CommandBufferInheritanceInfo);
+            inheritance_info.s_type = .command_buffer_inheritance_info;
+
+            var begin_info = std.mem.zeroes(vk.CommandBufferBeginInfo);
+            begin_info.s_type = .command_buffer_begin_info;
+            begin_info.p_inheritance_info = &inheritance_info;
+
+            if (scope.scope_type == .render_pass) {
+                if (scope.current_render_pass) |render_pass| {
+                    inheritance_info.render_pass = render_pass.render_pass;
+                    inheritance_info.framebuffer = render_pass.framebuffers.items[render_pass.swapchain.image_index];
+
+                    begin_info.flags = .{ .render_pass_continue_bit = true };
+
+                    try command_list_data.render_passes.append(self.allocator, render_pass);
+                }
+            }
+            else {
+                try command_list_data.render_passes.append(self.allocator, null);
+            }
+
+            try self.device.beginCommandBuffer(command_buffer, &begin_info);
+            try self.executeCommandScope(command_buffer, &scope);
+            try self.device.endCommandBuffer(command_buffer);
+
+            try command_list_data.buffers.append(self.allocator, command_buffer);
+            try command_list_data.types.append(self.allocator, scope.scope_type);
+        }
+
+        try self.submitted_command_lists[self.frame_index].append(self.allocator, command_list_data);
+    }
+
+    fn executeCommandScope(self: *const Device, command_buffer: vk.CommandBuffer, scope: *const CommandScope) !void {
+        for (scope.commands.items) |command| {
+            switch (command.args) {
+                .bind_pipeline_args => |args| {
+                    self.device.cmdBindPipeline(command_buffer, .graphics, args.pipeline.pipeline);
+                },
+                .bind_shader_resource_args => |args| {
+                    const set: [1]vk.DescriptorSet = [_]vk.DescriptorSet { args.shader_resource.descriptor_set };
+
+                    self.device.cmdBindDescriptorSets(
+                        command_buffer,
+                        .graphics,
+                        args.pipeline.pipeline_layout,
+                        args.set,
+                        1,
+                        &set,
+                        0,
+                        null
+                    );
+                },
+                .set_viewport_args => |args| {
+                    const viewport = [_]vk.Viewport {
+                        .{
+                            .x = args.position[0],
+                            .y = args.position[1],
+                            .width = args.size[0],
+                            .height = args.size[1],
+                            .min_depth = args.min_depth,
+                            .max_depth = args.max_depth
+                        }
+                    };
+
+                    self.device.cmdSetViewport(command_buffer, 0, 1, &viewport);
+                },
+                .set_scissor_args => |args| {
+                    const scissor = [_]vk.Rect2D{
+                        .{
+                            .extent = .{ .width = @intFromFloat(args.max[0] - args.min[0]), .height = @intFromFloat(args.max[1] - args.min[1]) },
+                            .offset = .{ .x = 0, .y = 0}
+                        }
+                    };
+
+                    self.device.cmdSetScissor(command_buffer, 0, 1, &scissor);
+                },
+                .set_line_width_args => |args| {
+                    self.device.cmdSetLineWidth(command_buffer, args.line_width);
+                },
+                .bind_vertex_buffers_args => |args| {
+                    var buffers = try std.ArrayListUnmanaged(vk.Buffer).initCapacity(self.allocator, args.buffers.len);
+                    var offsets = try std.ArrayListUnmanaged(vk.DeviceSize).initCapacity(self.allocator, args.buffers.len);
+
+                    for (0..args.buffers.len) |i| {
+                        buffers.appendAssumeCapacity(args.buffers[i].buffer);
+                        offsets.appendAssumeCapacity(0);
+                    }
+
+                    self.device.cmdBindVertexBuffers(command_buffer, 0, @intCast(args.buffers.len), buffers.items.ptr, offsets.items.ptr);
+
+                    offsets.deinit(self.allocator);
+                    buffers.deinit(self.allocator);
+                },
+                .bind_index_buffer_args => |args| {
+                    self.device.cmdBindIndexBuffer(command_buffer, args.buffer.buffer, 0, .uint32);
+                },
+                .draw_args => |args| {
+                    self.device.cmdDraw(command_buffer, args.vertex_count, 1, args.vertex_offset, 0);
+                },
+                .draw_indexed_args => |args| {
+                    self.device.cmdDrawIndexed(command_buffer, args.index_count, 1, args.index_offset, args.vertex_offset, 0);
+                },
+                .native_command => |native| {
+                    native.record(self, @ptrFromInt(@intFromEnum(command_buffer)));
+                }
+            }
+        }
+    }
+
+    pub fn beginSingleTimeCommands(self: *const Device) CommandList {
+        var command_list = CommandList{
+            .allocator = self.allocator,
+            .is_single_time_commands = true,
+        };
+        command_list.begin();
+
+        return command_list;
+    }
+
+    pub fn endSingleTimeCommands(self: *const Device, command_list: *CommandList) !void {
+        if (!command_list.is_single_time_commands) {
+            return error.NotSingleTimeCommands;
+        }
+
+        try command_list.end();
+
+        const alloc_info = vk.CommandBufferAllocateInfo{
+            .s_type = .command_buffer_allocate_info,
+            .command_pool = self.command_pool,
+            .command_buffer_count = 1,
+            .level = .primary
+        };
+
+        var command_buffers = [_]vk.CommandBuffer { .null_handle };
+        try self.device.allocateCommandBuffers(&alloc_info, &command_buffers);
+
+        const command_buffer = command_buffers[0];
+
+        const begin_info = vk.CommandBufferBeginInfo{
+            .s_type = .command_buffer_begin_info,
+            .flags = .{ .one_time_submit_bit = true },
+        };
+
+        try self.device.beginCommandBuffer(command_buffer, &begin_info);
+
+        for (command_list.scopes.items) |scope| {
+            try self.executeCommandScope(command_buffer, &scope);
+        }
+
+        try self.device.endCommandBuffer(command_buffer);
+
+        command_buffers[0] = command_buffer;
+
+        const submit_info = [_]vk.SubmitInfo {
+            .{
+                .s_type = .submit_info,
+                .command_buffer_count = 1,
+                .p_command_buffers = &command_buffers
+            }
+        };
+
+        try self.device.queueSubmit(self.graphics_queue, 1, &submit_info, .null_handle);
+        try self.device.queueWaitIdle(self.graphics_queue);
+
+        self.device.freeCommandBuffers(self.command_pool, 1, &command_buffers);
+    
+        self.destroyCommandList(command_list);
+    }
+
+    pub fn createSwapchain(self: *Device, swapchain_info: *const SwapchainInfo) !*Swapchain {
         const swapchain_support = try querySwapchainSupport(self.instance.instance, self.allocator, self.physical_device, self.instance.surface);
         defer self.allocator.free(swapchain_support.formats);
         defer self.allocator.free(swapchain_support.present_modes);
@@ -322,10 +661,25 @@ pub const Device = struct {
             try swapchain_obj.attachments.append(attachment);
         }
 
-        return swapchain_obj;
+        self.swapchain = swapchain_obj;
+
+        const semaphore_info = vk.SemaphoreCreateInfo{
+            .s_type = .semaphore_create_info,
+        };
+
+        for (0..self.swapchain.?.swapchain_image_count) |_| {
+            const semaphore = try self.device.createSemaphore(&semaphore_info, self.instance.vk_allocator);
+            try self.render_finished_semaphores.append(self.allocator, semaphore);
+        }
+
+        return &self.swapchain.?;
     }
 
     pub fn destroySwapchain(self: *Device, swapchain: *Swapchain) void {
+        self.device.deviceWaitIdle() catch {
+            return;
+        };
+
         for (swapchain.attachments.items) |attachment| {
             for (attachment.views.items) |view| {
                 self.device.destroyImageView(view, self.instance.vk_allocator);
@@ -363,7 +717,10 @@ pub const Device = struct {
     }
 
     pub fn destroyRenderPass(self: *Device, render_pass: *RenderPass) void {
-        _ = self;
+        self.device.deviceWaitIdle() catch {
+            return;
+        };
+
         render_pass.dispose();
     }
 
@@ -447,6 +804,10 @@ pub const Device = struct {
             attribute_descriptions[i].format = @enumFromInt(vertex_input_layout.@"1"[i].Format);
         }
 
+        for (attribute_descriptions) |desc| {
+            std.debug.print("binding = {}, format = {s}, location = {}, offset = {}\n", .{ desc.binding, @tagName(desc.format), desc.location, desc.offset });
+        }
+
         const vertex_input_info = vk.PipelineVertexInputStateCreateInfo{
             .s_type = .pipeline_vertex_input_state_create_info,
             .vertex_binding_description_count = @intCast(binding_descriptions.len),
@@ -526,62 +887,12 @@ pub const Device = struct {
             .back = std.mem.zeroInit(vk.StencilOpState, .{})
         };
 
-        var bindings = std.ArrayListUnmanaged(vk.DescriptorSetLayoutBinding){};
-        defer bindings.deinit(self.allocator);
+        const set_layouts = pipeline_info.shader_resource_layout.descriptor_set_layout.items;
 
-        if (pipeline_info.vertex_shader.shader_resources) |resources| {
-            for (resources) |resource| {
-                try bindings.append(self.allocator, vk.DescriptorSetLayoutBinding{
-                    .binding = resource.binding,
-                    .descriptor_count = resource.resource_count,
-                    .stage_flags = .{ .vertex_bit = true },
-                    .descriptor_type = convertShaderResourceType(resource.resource_type),
-                });
-            }
-        }
-
-        if (pipeline_info.pixel_shader.shader_resources) |resources| {
-            for (resources) |resource| {
-                try bindings.append(self.allocator, vk.DescriptorSetLayoutBinding{
-                    .binding = resource.binding,
-                    .descriptor_count = resource.resource_count,
-                    .stage_flags = .{ .fragment_bit = true },
-                    .descriptor_type = convertShaderResourceType(resource.resource_type),
-                });
-            }
-        }
-
-        const layout_info = vk.DescriptorSetLayoutCreateInfo{
-            .s_type = .descriptor_set_layout_create_info,
-            .binding_count = @intCast(bindings.items.len),
-            .p_bindings = bindings.items.ptr
-        };
-
-        const set_layout = try self.device.createDescriptorSetLayout(&layout_info, self.instance.vk_allocator);
-        errdefer self.device.destroyDescriptorSetLayout(set_layout, self.instance.vk_allocator);
-        
-        var set_layouts: [MaxFramesInFlight]vk.DescriptorSetLayout = std.mem.zeroes([MaxFramesInFlight]vk.DescriptorSetLayout);
-        for (0..MaxFramesInFlight) |i| {
-            set_layouts[i] = set_layout;
-        }
-
-        const alloc_info = vk.DescriptorSetAllocateInfo{
-            .s_type = .descriptor_set_allocate_info,
-            .descriptor_pool = self.descriptor_pool,
-            .descriptor_set_count = MaxFramesInFlight,
-            .p_set_layouts = &set_layouts
-        };
-
-        var descriptor_sets: [MaxFramesInFlight]vk.DescriptorSet = std.mem.zeroes([MaxFramesInFlight]vk.DescriptorSet);
-        
-        try self.device.allocateDescriptorSets(&alloc_info, &descriptor_sets);
-
-        const set_layout_ptr: [1]vk.DescriptorSetLayout = [_]vk.DescriptorSetLayout{ set_layout };
-        
         const pipeline_layout_info = vk.PipelineLayoutCreateInfo{
             .s_type = .pipeline_layout_create_info,
-            .set_layout_count = 1,
-            .p_set_layouts = &set_layout_ptr,
+            .set_layout_count = @intCast(set_layouts.len),
+            .p_set_layouts = set_layouts.ptr,
             .push_constant_range_count = 0,
             .p_push_constant_ranges = null
         };
@@ -619,8 +930,7 @@ pub const Device = struct {
             .pipeline_info = pipeline_info.*,
             .vertex_shader = vertex_shader_module,
             .pixel_shader = pixel_shader_module,
-            .set_layout = set_layout,
-            .descriptor_sets = descriptor_sets,
+            .resource_layout = pipeline_info.shader_resource_layout,
             .pipeline_layout = pipeline_layout,
             .pipeline = pipelines[0]
         };
@@ -628,12 +938,255 @@ pub const Device = struct {
         return pipeline_obj;
     }
 
+    pub fn createBuffer(self: *Device, buffer_type: BufferType, size: usize) !Buffer {
+        var buffer = Buffer{
+            .device = self,
+            .buffer_type = buffer_type,
+            .size = size,
+        };
+
+        try createBufferInternal(
+            self.instance.instance,
+            self.physical_device,
+            self.device,
+            self.instance.vk_allocator,
+            size,
+            getBufferUsage(buffer_type),
+            getBufferMemoryProperties(buffer_type),
+            &buffer.buffer,
+            &buffer.memory
+        );
+
+        if (needsStagingBuffer(buffer_type)) {
+            try createBufferInternal(
+                self.instance.instance,
+                self.physical_device,
+                self.device,
+                self.instance.vk_allocator,
+                size,
+                .{ .transfer_src_bit = true },
+                .{ .host_visible_bit = true, .host_coherent_bit = true },
+                &buffer.staging_buffer,
+                &buffer.staging_memory
+            );
+        }
+
+        return buffer;
+    }
+
+    pub fn createBufferWithData(self: *Device, buffer_type: BufferType, data: []const u8) !Buffer {
+        var buffer = Buffer{
+            .device = self,
+            .buffer_type = buffer_type,
+            .size = data.len,
+        };
+
+        try createBufferInternal(
+            self.instance.instance,
+            self.physical_device,
+            self.device,
+            self.instance.vk_allocator,
+            data.len,
+            getBufferUsage(buffer_type),
+            getBufferMemoryProperties(buffer_type),
+            &buffer.buffer,
+            &buffer.memory
+        );
+
+        if (needsStagingBuffer(buffer_type)) {
+            try createBufferInternal(
+                self.instance.instance,
+                self.physical_device,
+                self.device,
+                self.instance.vk_allocator,
+                data.len,
+                .{ .transfer_src_bit = true },
+                .{ .host_visible_bit = true, .host_coherent_bit = true },
+                &buffer.staging_buffer,
+                &buffer.staging_memory
+            );
+        }
+
+        try buffer.setData(data, 0);
+
+        return buffer;
+    }
+
+    pub fn destroyBuffer(self: *const Device, buffer: *const Buffer) void {
+        self.device.deviceWaitIdle() catch {
+            return;
+        };
+
+        if (needsStagingBuffer(buffer.buffer_type)) {
+            self.device.destroyBuffer(buffer.staging_buffer, self.instance.vk_allocator);
+            self.device.freeMemory(buffer.staging_memory, self.instance.vk_allocator);
+        }
+
+        self.device.destroyBuffer(buffer.buffer, self.instance.vk_allocator);
+        self.device.freeMemory(buffer.memory, self.instance.vk_allocator);
+    }
+
     pub fn destroyGraphicsPipeline(self: *const Device, pipeline: *const GraphicsPipeline) void {
+        self.device.deviceWaitIdle() catch {
+            return;
+        };
+
         self.device.destroyPipeline(pipeline.pipeline, self.instance.vk_allocator);
         self.device.destroyPipelineLayout(pipeline.pipeline_layout, self.instance.vk_allocator);
-        self.device.destroyDescriptorSetLayout(pipeline.set_layout, self.instance.vk_allocator);
         self.device.destroyShaderModule(pipeline.pixel_shader, self.instance.vk_allocator);
         self.device.destroyShaderModule(pipeline.vertex_shader, self.instance.vk_allocator);
+    }
+
+    pub fn createCommandList(self: *const Device) CommandList {
+        return .{
+            .allocator = self.allocator,
+        };
+    }
+
+    pub fn destroyCommandList(self: *const Device, command_list: *CommandList) void {
+        self.device.deviceWaitIdle() catch {
+            return;
+        };
+
+        for (0..command_list.scopes.items.len) |i| {
+            var scope: *CommandScope = @constCast(&command_list.scopes.items[i]);
+            for (scope.commands.items) |entry| {
+                switch (entry.args) {
+                    .native_command => |native| {
+                        var n = native;
+                        var allocator = self.allocator;
+                        n.deinit(&allocator);
+                    },
+                    else => {}
+                }
+            }
+
+            scope.commands.deinit(command_list.allocator);
+        }
+
+        command_list.scopes.deinit(command_list.allocator);
+    }
+
+    pub fn initShaderResourceLayout(self: *const Device, shader_resource_layout: *ShaderResourceLayout) !void {
+        for (shader_resource_layout.sets) |set| {
+            var bindings: std.ArrayList(vk.DescriptorSetLayoutBinding) = .{};
+            defer bindings.deinit(self.allocator);
+
+            for (set.resources) |resource| {
+                const descriptor_binding = vk.DescriptorSetLayoutBinding{
+                    .binding = resource.binding,
+                    .descriptor_type = convertShaderResourceType(resource.resource_type),
+                    .descriptor_count = resource.resource_array_count,
+                    .stage_flags = convertShaderStage(resource.stage)
+                };
+
+                try bindings.append(self.allocator, descriptor_binding);
+            }
+
+            const layout_info = vk.DescriptorSetLayoutCreateInfo{
+                .s_type = .descriptor_set_layout_create_info,
+                .binding_count = @intCast(bindings.items.len),
+                .p_bindings = bindings.items.ptr,
+            };
+
+            try shader_resource_layout.descriptor_set_layout.append(self.allocator, try self.device.createDescriptorSetLayout(&layout_info, self.instance.vk_allocator));
+        }
+    }
+
+    pub fn deinitShaderResourceLayout(self: *const Device, shader_resource_layout: *ShaderResourceLayout) void {
+        for (shader_resource_layout.descriptor_set_layout.items) |set_layout| {
+            self.device.destroyDescriptorSetLayout(set_layout, self.instance.vk_allocator);
+        }
+        shader_resource_layout.descriptor_set_layout.deinit(self.allocator);
+    }
+
+    pub fn createShaderResource(self: *Device, set: u32, shader_resource_layout: *const ShaderResourceLayout) !ShaderResource {
+        const set_layouts = [_]vk.DescriptorSetLayout{ shader_resource_layout.descriptor_set_layout.items[set] };
+
+        const alloc_info = vk.DescriptorSetAllocateInfo{
+            .s_type = .descriptor_set_allocate_info,
+            .descriptor_pool = self.descriptor_pool,
+            .descriptor_set_count = 1,
+            .p_set_layouts = &set_layouts
+        };
+
+        var sets = [_]vk.DescriptorSet{ .null_handle };
+
+        try self.device.allocateDescriptorSets(&alloc_info, &sets);
+
+        return .{
+            .device = self,
+            .layout = shader_resource_layout,
+            .descriptor_set = sets[0]
+        };
+    }
+
+    pub fn destroyShaderResource(self: *const Device, shader_resource: *const ShaderResource) void {
+        _ = self;
+        _ = shader_resource;
+    }
+
+    const vulkan_copy_buffer_native_command_vtable = NativeCommandVTable{
+        .record = VulkanCopyBufferNativeCommand.record,
+        .destroy = VulkanCopyBufferNativeCommand.destroy,
+    };
+
+    const VulkanCopyBufferNativeCommand = struct {
+        src: vk.Buffer,
+        dst: vk.Buffer,
+        size: usize,
+        src_offset: usize,
+        dst_offset: usize,
+
+        pub fn create(allocator: *std.mem.Allocator, src: vk.Buffer, dst: vk.Buffer, size: usize, src_offset: usize, dst_offset: usize) !NativeCommand {
+            const cmd_size = @sizeOf(VulkanCopyBufferNativeCommand);
+            const raw = try allocator.alloc(u8, cmd_size);
+
+            const ptr = @as(*VulkanCopyBufferNativeCommand, @ptrCast(@alignCast(raw.ptr)));
+            ptr.* = VulkanCopyBufferNativeCommand{
+                .src = src,
+                .dst = dst,
+                .size = size,
+                .src_offset = src_offset,
+                .dst_offset = dst_offset,
+            };
+
+            return NativeCommand.init(&vulkan_copy_buffer_native_command_vtable, raw.ptr, raw.len);
+        }
+
+        pub fn record(device: *const Device, payload: ?[*]const u8, payload_size: usize, command_buffer: *anyopaque) void {
+            const cmd = @as(*const VulkanCopyBufferNativeCommand, @ptrCast(@alignCast(payload)));
+            const vk_cmd = @as(vk.CommandBuffer, @enumFromInt(@intFromPtr(command_buffer)));
+
+            const copy = [_]vk.BufferCopy{
+                .{
+                    .src_offset = @intCast(cmd.src_offset),
+                    .dst_offset = @intCast(cmd.dst_offset),
+                    .size = @intCast(cmd.size)
+                }
+            };
+
+            device.device.cmdCopyBuffer(vk_cmd, cmd.src, cmd.dst, 1, &copy);
+
+            _ = payload_size;
+        }
+
+        pub fn destroy(payload: ?[*]u8, payload_size: usize, allocator: *std.mem.Allocator) void {
+            if (payload) |p| {
+                allocator.free(p[0..payload_size]);
+            }
+        }
+    };
+
+    pub fn nativeBufferCopy(self: *Device, src: vk.Buffer, dst: vk.Buffer, size: usize, src_offset: usize, dst_offset: usize) !NativeCommand {
+        return try VulkanCopyBufferNativeCommand.create(
+            &self.allocator,
+            src,
+            dst,
+            size,
+            src_offset,
+            dst_offset
+        );
     }
 
     pub fn getPhysicalDeviceName(self: *const Device, allocator: std.mem.Allocator) ![:0]const u8 {
@@ -730,6 +1283,14 @@ fn checkDeviceExtensionSupport(instance: vk.InstanceProxy, allocator: std.mem.Al
     return required_extensions.count() == 0;
 }
 
+fn convertShaderStage(stage: ShaderStage) vk.ShaderStageFlags {
+    switch (stage) {
+        .vertex => return .{ .vertex_bit = true },
+        .pixel => return .{ .fragment_bit = true },
+        .compute => return .{ .compute_bit = true },
+    }
+}
+
 pub fn findMemoryType(instance: vk.InstanceProxy, physical_device: vk.PhysicalDevice, type_filter: u32, properties: vk.MemoryPropertyFlags) !u32 {
     const mem_properties = instance.getPhysicalDeviceMemoryProperties(physical_device);
 
@@ -752,7 +1313,77 @@ fn convertPrimitiveTopology(topology: PrimitiveTopology) vk.PrimitiveTopology {
 
 fn convertShaderResourceType(resource_type: ShaderResourceType) vk.DescriptorType {
     return switch (resource_type) {
-        .texture => .sampled_image,
-        .sampler_state => .sampler
+        .constant_buffer => .uniform_buffer,
+        .combined_image_sampler => .combined_image_sampler,
+        .sampled_image => .sampled_image,
+        .sampler => .sampler,
+        .storage_buffer => .storage_buffer,
+        .storage_image => .storage_image,
     };
+}
+
+fn getBufferUsage(buffer_type: BufferType) vk.BufferUsageFlags {
+    var flags: vk.BufferUsageFlags = .{};
+
+    if (@intFromEnum(buffer_type) & @intFromEnum(BufferType.vertex_buffer) != 0) {
+        flags.vertex_buffer_bit = true;
+    }
+    if (@intFromEnum(buffer_type) & @intFromEnum(BufferType.index_buffer) != 0) {
+        flags.index_buffer_bit = true;
+        flags.transfer_dst_bit = true;
+    }
+    if (@intFromEnum(buffer_type) & @intFromEnum(BufferType.staging_buffer) != 0) {
+        flags.transfer_src_bit = true;
+        flags.transfer_dst_bit = true;
+    }
+    if (@intFromEnum(buffer_type) & @intFromEnum(BufferType.constant_buffer) != 0) {
+        flags.uniform_buffer_bit = true;
+    }
+    if (@intFromEnum(buffer_type) & @intFromEnum(BufferType.storage_buffer) != 0) {
+        flags.transfer_src_bit = true;
+        flags.transfer_dst_bit = true;
+        flags.storage_buffer_bit = true;
+    }
+
+    return flags;
+}
+
+pub fn needsStagingBuffer(buffer_type: BufferType) bool {
+    return (@intFromEnum(buffer_type) & @intFromEnum(BufferType.index_buffer) != 0) or (@intFromEnum(buffer_type) & @intFromEnum(BufferType.storage_buffer) != 0);
+}
+
+fn getBufferMemoryProperties(buffer_type: BufferType) vk.MemoryPropertyFlags {
+    var flags: vk.MemoryPropertyFlags = .{};
+
+    if (needsStagingBuffer(buffer_type)) {
+        flags.device_local_bit = true;
+    } else {
+        flags.host_visible_bit = true;
+        flags.host_coherent_bit = true;
+    }
+
+    return flags;
+}
+
+fn createBufferInternal(instance: vk.InstanceProxy, physical_device: vk.PhysicalDevice, device: vk.DeviceProxy, allocator: ?*const vk.AllocationCallbacks, size: usize, usage: vk.BufferUsageFlags, properties: vk.MemoryPropertyFlags, out_buffer: *vk.Buffer, out_memory: *vk.DeviceMemory) !void {
+    const buffer_info = vk.BufferCreateInfo{
+        .s_type = .buffer_create_info,
+        .size = size,
+        .usage = usage,
+        .sharing_mode = .exclusive
+    };
+
+    out_buffer.* = try device.createBuffer(&buffer_info, allocator);
+
+    const mem_requirements: vk.MemoryRequirements = device.getBufferMemoryRequirements(out_buffer.*);
+
+    const alloc_info = vk.MemoryAllocateInfo{
+        .s_type = .memory_allocate_info,
+        .allocation_size = mem_requirements.size,
+        .memory_type_index = try findMemoryType(instance, physical_device, mem_requirements.memory_type_bits, properties)
+    };
+
+    out_memory.* = try device.allocateMemory(&alloc_info, allocator);
+    
+    try device.bindBufferMemory(out_buffer.*, out_memory.*, 0);
 }

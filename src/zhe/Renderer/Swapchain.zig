@@ -81,28 +81,28 @@ pub const Swapchain = struct {
     image_index: u32,
 
     pub fn acquireNextImage(self: *Swapchain) !void {
-        _ = try self.device.device.waitForFences(1, @ptrCast(&self.device.inFlightFences[self.device.frameIndex]), vk.TRUE, std.math.maxInt(u64));
+        _ = try self.device.device.waitForFences(1, self.device.in_flight_fences[self.device.frame_index..(self.device.frame_index + 1)].ptr, .true, std.math.maxInt(u64));
 
         var swapchain_recreate = false;
-        const result = self.device.device.acquireNextImageKHR(self.swapchain, std.math.max(u64), self.device.imageAvailableSemaphores[self.device.frameIndex], .null_handle) catch |err| {
-            if (err == error.OutOfDateKHR) {
-                swapchain_recreate = true;
-            }
-        };
+        const result = try self.device.device.acquireNextImageKHR(self.swapchain, std.math.maxInt(u64), self.device.image_available_semaphores[self.device.frame_index], .null_handle);// catch |err| {
+        //    if (err == error.OutOfDateKHR) {
+        //        swapchain_recreate = true;
+        //    }
+        //};
         if (result.result == .suboptimal_khr) {
             swapchain_recreate = true;
         }
 
         if (swapchain_recreate) {
-            self.recreateSwapchain();
+            try self.recreateSwapchain();
 
-            self.device.skipFrame = true;
+            self.device.skip_frame = true;
             return;
         }
 
-        self.imageIndex = result.image_index;
+        self.image_index = result.image_index;
 
-        try self.device.device.resetFences(1, @ptrCast(&self.device.inFlightFences[self.device.frameIndex]));
+        try self.device.device.resetFences(1, self.device.in_flight_fences[self.device.frame_index..(self.device.frame_index + 1)].ptr);
     }
 
     pub fn recreateSwapchain(self: *Swapchain) !void {

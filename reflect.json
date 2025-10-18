@@ -1,0 +1,166 @@
+{
+    "parameters": [
+        {
+            "name": "c_Camera",
+            "binding": {"kind": "descriptorTableSlot", "index": 0},
+            "type": {
+                "kind": "constantBuffer",
+                "elementType": {
+                    "kind": "struct",
+                    "name": "CameraData",
+                    "fields": [
+                        {
+                            "name": "ViewProjection",
+                            "type": {
+                                "kind": "matrix",
+                                "rowCount": 4,
+                                "columnCount": 4,
+                                "elementType": {
+                                    "kind": "scalar",
+                                    "scalarType": "float32"
+                                }
+                            },
+                            "binding": {"kind": "uniform", "offset": 0, "size": 64, "elementStride": 0}
+                        }
+                    ]
+                },
+                "containerVarLayout": {
+                    "binding": {"kind": "descriptorTableSlot", "index": 0}
+                },
+                "elementVarLayout": {
+                    "type": {
+                        "kind": "struct",
+                        "name": "CameraData",
+                        "fields": [
+                            {
+                                "name": "ViewProjection",
+                                "type": {
+                                    "kind": "matrix",
+                                    "rowCount": 4,
+                                    "columnCount": 4,
+                                    "elementType": {
+                                        "kind": "scalar",
+                                        "scalarType": "float32"
+                                    }
+                                },
+                                "binding": {"kind": "uniform", "offset": 0, "size": 64, "elementStride": 0}
+                            }
+                        ]
+                    },
+                    "binding": {"kind": "uniform", "offset": 0, "size": 64, "elementStride": 0}
+                }
+            }
+        }
+    ],
+    "entryPoints": [
+        {
+            "name": "vertexMain",
+            "stage": "vertex",
+            "parameters": [
+                {
+                    "name": "input",
+                    "stage": "vertex",
+                    "binding": {"kind": "varyingInput", "index": 0, "count": 3},
+                    "type": {
+                        "kind": "struct",
+                        "name": "PerVertexInput",
+                        "fields": [
+                            {
+                                "name": "Position",
+                                "type": {
+                                    "kind": "vector",
+                                    "elementCount": 4,
+                                    "elementType": {
+                                        "kind": "scalar",
+                                        "scalarType": "float32"
+                                    }
+                                },
+                                "stage": "vertex",
+                                "binding": {"kind": "varyingInput", "index": 0},
+                                "semanticName": "POSITION"
+                            },
+                            {
+                                "name": "Color",
+                                "type": {
+                                    "kind": "vector",
+                                    "elementCount": 4,
+                                    "elementType": {
+                                        "kind": "scalar",
+                                        "scalarType": "float32"
+                                    }
+                                },
+                                "stage": "vertex",
+                                "binding": {"kind": "varyingInput", "index": 1},
+                                "semanticName": "COLOR"
+                            },
+                            {
+                                "name": "TexCoord",
+                                "type": {
+                                    "kind": "vector",
+                                    "elementCount": 4,
+                                    "elementType": {
+                                        "kind": "scalar",
+                                        "scalarType": "float32"
+                                    }
+                                },
+                                "stage": "vertex",
+                                "binding": {"kind": "varyingInput", "index": 2},
+                                "semanticName": "TEXCOORD"
+                            }
+                        ]
+                    }
+                }
+            ],
+            "result": {
+                "stage": "vertex",
+                "binding": {"kind": "varyingOutput", "index": 0, "count": 2},
+                "type": {
+                    "kind": "struct",
+                    "name": "VertexOutput",
+                    "fields": [
+                        {
+                            "name": "Position",
+                            "type": {
+                                "kind": "vector",
+                                "elementCount": 4,
+                                "elementType": {
+                                    "kind": "scalar",
+                                    "scalarType": "float32"
+                                }
+                            },
+                            "semanticName": "SV_POSITION"
+                        },
+                        {
+                            "name": "Color",
+                            "type": {
+                                "kind": "vector",
+                                "elementCount": 4,
+                                "elementType": {
+                                    "kind": "scalar",
+                                    "scalarType": "float32"
+                                }
+                            },
+                            "stage": "vertex",
+                            "binding": {"kind": "varyingOutput", "index": 0},
+                            "semanticName": "COLOR"
+                        },
+                        {
+                            "name": "TexCoord",
+                            "type": {
+                                "kind": "vector",
+                                "elementCount": 2,
+                                "elementType": {
+                                    "kind": "scalar",
+                                    "scalarType": "float32"
+                                }
+                            },
+                            "stage": "vertex",
+                            "binding": {"kind": "varyingOutput", "index": 1},
+                            "semanticName": "TEXCOORD"
+                        }
+                    ]
+                }
+            }
+        }
+    ]
+}

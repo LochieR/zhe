@@ -4,11 +4,13 @@ const std = @import("std");
 // declaratively construct a build graph that will be executed by an external
 // runner.
 pub fn build(b: *std.Build) void {
-    const target = b.standardTargetOptions(.{});
+    const target = b.standardTargetOptions(.{
+        //.default_target = .{ .os_tag = .windows, .abi = .msvc }
+    });
     const optimize = b.standardOptimizeOption(.{});
 
     const cmake_build_type = switch(optimize) {
-        .Debug => "Debug",
+        .Debug => "Release",
         .ReleaseFast => "Release",
         .ReleaseSafe => "Release",
         .ReleaseSmall => "Release",
@@ -27,6 +29,9 @@ pub fn build(b: *std.Build) void {
         "deps/slang",
         "-B",
         "deps/slang/build",
+        "-DSLANG_LIB_TYPE=STATIC",
+        "-DSLANG_ENABLE_EXAMPLES=OFF",
+        "-DSLANG_ENABLE_TESTS=OFF",
         cmake_arg.items
     });
 
@@ -164,6 +169,8 @@ pub fn build(b: *std.Build) void {
         glfw_c.root_module.linkSystemLibrary("user32", .{});
         glfw_c.root_module.linkSystemLibrary("kernel32", .{});
         glfw_c.root_module.linkSystemLibrary("shell32", .{});
+
+        exe.root_module.linkSystemLibrary("dwmapi", .{});
     } else if (target.result.os.tag == .linux) {
         glfw_c.root_module.addCSourceFiles(.{
             .files = &.{

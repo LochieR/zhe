@@ -1,10 +1,18 @@
 module basic;
 
+struct CameraData
+{
+    matrix<float, 4, 4> ViewProjection;
+};
+
+[[vk::binding(0, 0)]]
+ConstantBuffer<CameraData> c_Camera : register(b0, space0);
+
 struct PerVertexInput
 {
     float4 Position : POSITION;
     float4 Color : COLOR;
-    float2 TexCoord : TEXCOORD0;
+    float4 TexCoord : TEXCOORD0;
 };
 
 struct VertexOutput
@@ -19,21 +27,15 @@ VertexOutput vertexMain(PerVertexInput input)
 {
     VertexOutput output;
 
-    output.Position = input.Position;
+    output.Position = mul(c_Camera.ViewProjection, input.Position);
     output.Color = input.Color;
-    output.TexCoord = input.TexCoord;
+    output.TexCoord = input.TexCoord.xy;
 
     return output;
 }
 
-[[vk::binding(0, 0)]]
-Texture2D r_Texture : register(t0);
-
-[[vk::binding(1, 0)]]
-SamplerState r_Sampler : register(s0);
-
 [shader("pixel")]
 float4 pixelMain(VertexOutput input) : SV_Target
 {
-    return r_Texture.Sample(r_Sampler, input.TexCoord);
+    return input.Color;
 }
